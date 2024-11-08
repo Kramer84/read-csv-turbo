@@ -4,6 +4,7 @@ import platform
 import subprocess
 import shlex
 from io import StringIO
+import concurrent.futures
 
 __all__ = [
     "read_csv_head",
@@ -275,6 +276,7 @@ def read_csv_headtail(path, header=True, skip_n_first_rows=0, n_rows_head=1, n_r
 
     # Adjust n_rows_head and n_rows_tail if they exceed available lines
     n_rows_head = min(n_rows_head, available_lines)
+
     n_rows_tail = min(n_rows_tail, available_lines)
 
     # Calculate overlap
@@ -283,16 +285,19 @@ def read_csv_headtail(path, header=True, skip_n_first_rows=0, n_rows_head=1, n_r
         # Reduce n_rows_tail to avoid overlap
         n_rows_tail -= overlap
 
-    # Retrieve head and tail data
-    head_str = csv_head(path, total_lines, header, skip_n_first_rows, n_rows_head)
-    tail_str = ''
-    if n_rows_tail > 0:
-        tail_str = csv_tail(path, total_lines, header, skip_n_first_rows, n_rows_tail)
+    # Concurrently retrieve header, head, and tail data
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        future_header = executor.submit(csv_header, path, skip_n_first_rows) if header else None
+        future_head = executor.submit(csv_head, path, total_lines, header, skip_n_first_rows, n_rows_head)
+        future_tail = executor.submit(csv_tail, path, total_lines, header, skip_n_first_rows, n_rows_tail)
+
+        header_str = future_header.result() if future_header else ''
+        head_str = future_head.result()
+        tail_str = future_tail.result() if n_rows_tail > 0 else ''
 
     # Combine head and tail data
     data_str = '\n'.join(filter(None, [head_str.strip(), tail_str.strip()]))
 
-    header_str = csv_header(path, skip_n_first_rows) if header else ''
     return parse_csv_content(header_str, data_str, header=header, **kwargs)
 
 def read_csv_line_range(path, n, rows_after_n=0, header=True, skip_n_first_rows=0, **kwargs):
@@ -342,69 +347,3 @@ def read_csv_line_range(path, n, rows_after_n=0, header=True, skip_n_first_rows=
     data_str = csv_line_range(path, total_lines, n, rows_after_n, header, skip_n_first_rows)
     header_str = csv_header(path, skip_n_first_rows) if header else ''
     return parse_csv_content(header_str, data_str, header=header, **kwargs)
-
-
-# Bit faster headtail reading but cumbersome and not a real advantage.
-"""
-import threading
-
-def read_csv_headtail(path, header=True, skip_n_first_rows=0, n_rows_head=1, n_rows_tail=1, **kwargs):
-    check_file_exists(path)
-    total_lines = get_total_lines(path)
-    skip_lines = skip_n_first_rows + (1 if header else 0)
-    available_lines = total_lines - skip_lines
-
-    if available_lines <= 0:
-        # No data available
-        header_str = ''
-        data_str = ''
-    else:
-        # Adjust n_rows_head and n_rows_tail if they exceed available lines
-        n_rows_head = min(n_rows_head, available_lines)
-        n_rows_tail = min(n_rows_tail, available_lines)
-
-        # Calculate overlap
-        overlap = n_rows_head + n_rows_tail - available_lines
-        if overlap > 0:
-            # Reduce n_rows_tail to avoid overlap
-            n_rows_tail -= overlap
-
-        head_str = ''
-        tail_str = ''
-
-        def read_head():
-            nonlocal head_str
-            head_str = csv_head(path, total_lines, header, skip_n_first_rows, n_rows_head)
-
-        def read_tail():
-            nonlocal tail_str
-            if n_rows_tail > 0:
-                tail_str = csv_tail(path, total_lines, header, skip_n_first_rows, n_rows_tail)
-
-        # Create threads
-        head_thread = threading.Thread(target=read_head)
-        tail_thread = threading.Thread(target=read_tail)
-
-        # Start threads
-        head_thread.start()
-        tail_thread.start()
-
-        # Wait for both threads to finish
-        head_thread.join()
-        tail_thread.join()
-
-        # Extract header from head_str if header is True
-        if header:
-            lines = head_str.strip().split('\n')
-            header_str = lines[0] if lines else ''
-            # Remove header from head_str if it's included
-            head_data = '\n'.join(lines[1:]) if len(lines) > 1 else ''
-        else:
-            header_str = ''
-            head_data = head_str.strip()
-
-        # Combine head data and tail data
-        data_str = '\n'.join(filter(None, [head_data, tail_str.strip()]))
-
-    return parse_csv_content(header_str, data_str, header=header, **kwargs)
-"""

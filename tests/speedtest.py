@@ -57,7 +57,7 @@ print("""
 
 start_time = time.perf_counter()
 
-df = rct.read_csv_headtail(csv_file_path)
+df = rct.read_csv_headtail(csv_file_path, header=True)
 print(df)
 
 end_time = time.perf_counter()
