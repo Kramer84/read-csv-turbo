@@ -1,10 +1,17 @@
 import os
-import pandas as pd
 import platform
 import subprocess
 import shlex
-from io import StringIO
+from io import StringIO, BytesIO
 import concurrent.futures
+
+# Try importing polars optionally
+try:
+    import polars as pl
+except ImportError:
+    pl = None
+
+import pandas as pd
 
 __all__ = [
     "read_csv_head",
@@ -125,40 +132,64 @@ def csv_line_range(path, total_lines, n, rows_after_n=0, header=True, skip_n_fir
     output = subprocess.check_output(cmd).decode('utf-8').strip()
     return output
 
-def parse_csv_content(header_str, data_str, header=True, **kwargs):
+# --- UPDATED PARSING LOGIC ---
+
+def parse_csv_content(header_str, data_str, header=True, use_polars=False, **kwargs):
     sep = kwargs.pop('sep', ',')
     # Strip whitespace to accurately check for emptiness
     header_str = header_str.strip() if header_str else ''
     data_str = data_str.strip() if data_str else ''
 
+    # Construct the full CSV string content
     if header:
         if not header_str:
-            # No header line found
-            if not data_str:
-                # No header and no data
-                return pd.DataFrame()
-            else:
-                # No header but data present
-                string_data = StringIO(data_str)
-                return pd.read_csv(string_data, sep=sep, header=None, **kwargs)
+            full_content = data_str
+            has_header = False
         else:
             if not data_str:
-                # Header present but no data
-                string_data = StringIO(header_str)
-                return pd.read_csv(string_data, sep=sep, header=0, **kwargs)
+                full_content = header_str
+                # If only header exists, we treat it as having header so we get empty df with cols
+                has_header = True
             else:
-                # Both header and data present
-                string_data = StringIO(f'{header_str}\n{data_str}')
-                return pd.read_csv(string_data, sep=sep, header=0, **kwargs)
+                full_content = f'{header_str}\n{data_str}'
+                has_header = True
     else:
-        if not data_str:
-            # No data and no header
-            return pd.DataFrame()
+        full_content = data_str
+        has_header = False
+
+    if not full_content:
+        # Empty result
+        if use_polars:
+            if pl is None: raise ImportError("Polars is not installed.")
+            return pl.DataFrame()
         else:
-            string_data = StringIO(data_str)
+            return pd.DataFrame()
+
+    if use_polars:
+        if pl is None: raise ImportError("Polars is not installed.")
+
+        # Polars specific adjustments
+        # map 'sep' to 'separator' if not present
+        if 'separator' not in kwargs:
+            kwargs['separator'] = sep
+
+        # Polars read_csv from buffer works best with BytesIO
+        return pl.read_csv(
+            BytesIO(full_content.encode('utf-8')),
+            has_header=has_header,
+            **kwargs
+        )
+    else:
+        # Pandas implementation
+        string_data = StringIO(full_content)
+        if has_header:
+            return pd.read_csv(string_data, sep=sep, header=0, **kwargs)
+        else:
             return pd.read_csv(string_data, sep=sep, header=None, **kwargs)
 
-def read_csv_head(path, header=True, skip_n_first_rows=0, n_rows=1, **kwargs):
+# --- UPDATED PUBLIC FUNCTIONS ---
+
+def read_csv_head(path, header=True, skip_n_first_rows=0, n_rows=1, use_polars=False, **kwargs):
     """
     Read the first `n_rows` of a CSV file into a pandas DataFrame.
 
@@ -191,9 +222,9 @@ def read_csv_head(path, header=True, skip_n_first_rows=0, n_rows=1, **kwargs):
     total_lines = get_total_lines(path)
     data_str = csv_head(path, total_lines, header, skip_n_first_rows, n_rows)
     header_str = csv_header(path, skip_n_first_rows) if header else ''
-    return parse_csv_content(header_str, data_str, header=header, **kwargs)
+    return parse_csv_content(header_str, data_str, header=header, use_polars=use_polars, **kwargs)
 
-def read_csv_tail(path, header=True, skip_n_first_rows=0, n_rows=1, **kwargs):
+def read_csv_tail(path, header=True, skip_n_first_rows=0, n_rows=1, use_polars=False, **kwargs):
     """
     Read the last `n_rows` of a CSV file into a pandas DataFrame.
 
@@ -226,9 +257,9 @@ def read_csv_tail(path, header=True, skip_n_first_rows=0, n_rows=1, **kwargs):
     total_lines = get_total_lines(path)
     data_str = csv_tail(path, total_lines, header, skip_n_first_rows, n_rows=n_rows)
     header_str = csv_header(path, skip_n_first_rows) if header else ''
-    return parse_csv_content(header_str, data_str, header=header, **kwargs)
+    return parse_csv_content(header_str, data_str, header=header, use_polars=use_polars, **kwargs)
 
-def read_csv_headtail(path, header=True, skip_n_first_rows=0, n_rows_head=1, n_rows_tail=1, **kwargs):
+def read_csv_headtail(path, header=True, skip_n_first_rows=0, n_rows_head=1, n_rows_tail=1, use_polars=False, **kwargs):
     """
     Read both the first `n_rows_head` and the last `n_rows_tail` of a CSV file into a pandas DataFrame.
 
@@ -272,11 +303,10 @@ def read_csv_headtail(path, header=True, skip_n_first_rows=0, n_rows_head=1, n_r
     if available_lines <= 0:
         # No data available
         header_str = csv_header(path, skip_n_first_rows) if header else ''
-        return parse_csv_content(header_str, '', header=header, **kwargs)
+        return parse_csv_content(header_str, '', header=header, use_polars=use_polars, **kwargs)
 
     # Adjust n_rows_head and n_rows_tail if they exceed available lines
     n_rows_head = min(n_rows_head, available_lines)
-
     n_rows_tail = min(n_rows_tail, available_lines)
 
     # Calculate overlap
@@ -298,9 +328,9 @@ def read_csv_headtail(path, header=True, skip_n_first_rows=0, n_rows_head=1, n_r
     # Combine head and tail data
     data_str = '\n'.join(filter(None, [head_str.strip(), tail_str.strip()]))
 
-    return parse_csv_content(header_str, data_str, header=header, **kwargs)
+    return parse_csv_content(header_str, data_str, header=header, use_polars=use_polars, **kwargs)
 
-def read_csv_line_range(path, n, rows_after_n=0, header=True, skip_n_first_rows=0, **kwargs):
+def read_csv_line_range(path, n, rows_after_n=0, header=True, skip_n_first_rows=0, use_polars=False, **kwargs):
     """
     Read a specific range of lines from a CSV file into a pandas DataFrame.
 
@@ -346,4 +376,4 @@ def read_csv_line_range(path, n, rows_after_n=0, header=True, skip_n_first_rows=
     total_lines = get_total_lines(path)
     data_str = csv_line_range(path, total_lines, n, rows_after_n, header, skip_n_first_rows)
     header_str = csv_header(path, skip_n_first_rows) if header else ''
-    return parse_csv_content(header_str, data_str, header=header, **kwargs)
+    return parse_csv_content(header_str, data_str, header=header, use_polars=use_polars, **kwargs)
